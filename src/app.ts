@@ -18,6 +18,7 @@ import {
 import GenericResourceRoute from './router/routes/genericResourceRoute';
 import ConfigHandler from './configHandler';
 import MetadataRoute from './router/routes/metadataRoute';
+import { cognitoRewriteMiddleware } from './router/middlewares/cognitoRewrite';
 import ResourceHandler from './router/handlers/resourceHandler';
 import RootRoute from './router/routes/rootRoute';
 import { applicationErrorMapper, httpErrorHandler, unknownErrorHandler } from './router/routes/errorHandling';
@@ -92,6 +93,14 @@ export function generateServerlessRouter(
         hasCORSEnabled,
     );
     mainRouter.use('/metadata', metadataRoute.router);
+
+    // feature switch for
+    if (
+        process.env.COGNITO_REWRITE_ENABLED !== undefined &&
+        process.env.COGNITO_REWRITE_ENABLED.toLowerCase().trim() === 'true'
+    ) {
+        mainRouter.use(cognitoRewriteMiddleware());
+    }
 
     if (fhirConfig.auth.strategy.service === 'SMART-on-FHIR') {
         // well-known URI http://www.hl7.org/fhir/smart-app-launch/conformance/index.html#using-well-known
