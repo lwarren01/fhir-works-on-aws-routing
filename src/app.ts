@@ -28,6 +28,7 @@ import { FHIRStructureDefinitionRegistry } from './registry';
 import { initializeOperationRegistry } from './operationDefinitions';
 import { setServerUrlMiddleware } from './router/middlewares/setServerUrl';
 import { setTenantIdMiddleware } from './router/middlewares/setTenantId';
+import AWS from './AWS';
 
 const configVersionSupported: ConfigVersion = 1;
 
@@ -99,7 +100,7 @@ export function generateServerlessRouter(
         process.env.COGNITO_REWRITE_ENABLED !== undefined &&
         process.env.COGNITO_REWRITE_ENABLED.toLowerCase().trim() === 'true'
     ) {
-        mainRouter.use(cognitoRewriteMiddleware());
+        mainRouter.use(cognitoRewriteMiddleware(new AWS.SSM()));
     }
 
     if (fhirConfig.auth.strategy.service === 'SMART-on-FHIR') {

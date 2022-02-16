@@ -6,7 +6,6 @@ import * as axios from 'axios';
 import * as jose from 'jose';
 import getComponentLogger from '../../loggerBuilder';
 import RouteHelper from '../routes/routeHelper';
-import AWS from '../../AWS';
 
 const TOKEN_USE_ACCESS = 'ACCESS';
 const OKTA_SCOPE = 'system/*.*';
@@ -23,9 +22,8 @@ const MSG_JWK_URL_NO_MATCH = 'token not from cognito JWK';
 const MSG_NO_COGNITO_JWK_KID = 'key id was not found for cognito token';
 const MSG_JWT_NOT_VERIFIED = 'unable to verify';
 const MSG_NOT_COGNITO_USER = 'Not a valid cognito username or token_use';
-const MSG_FATAL_ERROR = 'error processing cognito middleware';
 const logger = getComponentLogger().child({ method: 'cognitoRewrite' });
-const ssmClient: AWS.SSM = new AWS.SSM();
+let ssmClient: AWS.SSM;
 
 interface OktaParameters {
     tokenUrl: string;
@@ -110,25 +108,28 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
             } catch (e) {
                 logger.error({ e, url: jwkUrl }, 'Error calling to get JWK public keys');
                 if (i === 4) {
-                    throw new Error('Unable to get JWK');
+                    response = undefined;
+                    break;
                 }
             }
         }
 
-        response?.data.keys.forEach(async (key: jose.JWK) => {
-            if (!_.isUndefined(key.kid)) {
-                const jwk = await jose.importJWK(key);
-
-                // make sure it's a KeyLike and not UInt8
-                // @ts-ignore
-                if (!_.isUndefined(jwk.type)) {
+        if (!_.isUndefined(response)){
+            for (const key of response.data.keys){
+                if (!_.isUndefined(key.kid)) {
+                    const jwk = await jose.importJWK(key);
+    
+                    // make sure it's a KeyLike and not UInt8
                     // @ts-ignore
-                    keyToPem.set(key.kid, jwk);
-                } else {
-                    logger.info({ kid: key.kid }, 'JWK imported as uint8array type');
+                    if (!_.isUndefined(jwk.type)) {
+                        // @ts-ignore
+                        keyToPem.set(key.kid, jwk);
+                    } else {
+                        logger.info({ kid: key.kid }, 'JWK imported as uint8array type');
+                    }
                 }
             }
-        });
+        }
     }
 
     return keyToPem.get(kid);
@@ -141,7 +142,7 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
  * @return {string} Cognito public key in PEM format
  */
 const getCognitoJWK = async (kid: string): Promise<jose.KeyLike | undefined> => {
-    return getJWK(kid, `${process.env.COGNITO_JWK_URL}/.well-known/jwks.json`);
+    return await getJWK(kid, `${process.env.COGNITO_JWK_URL}/.well-known/jwks.json`);
 };
 
 /**
@@ -153,7 +154,7 @@ const getCognitoJWK = async (kid: string): Promise<jose.KeyLike | undefined> => 
 const getOktaJWK = async (kid: string): Promise<jose.KeyLike | undefined> => {
     const oktaParameters = await getOktaParameters();
 
-    return getJWK(kid, `${oktaParameters.tokenUrl}/v1/keys`);
+    return await getJWK(kid, `${oktaParameters.tokenUrl}/v1/keys`);
 };
 
 const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
@@ -167,12 +168,13 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
         client_secret: oktaParameters.clientSecret,
         grant_type: OKTA_GRANT_TYPE,
     }).toString();
+    const retryBase = RETRY_SLEEP_BASE;
     for (let i = 0; i < 5; i += 1) {
         try {
             /* eslint-disable no-await-in-loop */
             if (i !== 0) {
                 await new Promise((resolve) => {
-                    setTimeout(resolve, 2 ** (i + 10));
+                    setTimeout(resolve, 2 ** (i + retryBase));
                 });
             }
 
@@ -269,76 +271,84 @@ const getOktaToken = async (): Promise<string> => {
  *
  * @returns Async middleware function
  */
-export const cognitoRewriteMiddleware: () => (
+export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
     req: express.Request,
     res: express.Response,
     next: express.NextFunction,
-) => void = () => {
+) => void = (ssm:AWS.SSM) => {
+    ssmClient = ssm;
     return RouteHelper.wrapAsync(async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-        try {
-            // check if we have an authorization header w/Bearer
-            if (
-                _.isUndefined(req.headers.authorization) ||
-                req.headers.authorization.length < 8 ||
-                !req.headers.authorization.startsWith('Bearer')
-            ) {
-                logger.debug(MSG_NO_AUTH_HEADER);
-                next();
-            } else {
-                const bearerToken = cleanAuthHeader(req.headers.authorization);
-                // do a 1st pass parse to see if it's a token from cognito
-                const decodedPayload = jose.decodeJwt(bearerToken);
+        // check if we have an authorization header w/Bearer
+        if (
+            _.isUndefined(req.headers.authorization) ||
+            req.headers.authorization.length < 8 ||
+            !req.headers.authorization.startsWith('Bearer')
+        ) {
+            logger.debug(MSG_NO_AUTH_HEADER);
+            next();
+        } else {
+            const bearerToken = cleanAuthHeader(req.headers.authorization);
+            // do a 1st pass parse to see if it's a token from cognito
+            const decodedPayload = jose.decodeJwt(bearerToken);
 
-                // see if the token is from cognito
-                if (decodedPayload.iss === process.env.COGNITO_JWK_URL) {
-                    const decodedHeader = jose.decodeProtectedHeader(bearerToken);
+            // see if the token is from cognito
+            if (decodedPayload.iss === process.env.COGNITO_JWK_URL) {
+                const decodedHeader = jose.decodeProtectedHeader(bearerToken);
 
-                    if (!_.isUndefined(decodedHeader.kid)) {
-                        // it's looks like a token from cognito but we need to verify the token's key with the public key
-                        const cognitoJWK: jose.KeyLike | undefined = await getCognitoJWK(decodedHeader.kid);
-                        if (!_.isUndefined(cognitoJWK)) {
-                            // verify the cognito JWT
-                            try {
-                                const claim = await jose.jwtVerify(bearerToken, cognitoJWK, {
-                                    issuer: process.env.COGNITO_JWK_URL,
-                                });
+                if (!_.isUndefined(decodedHeader.kid)) {
+                    // it's looks like a token from cognito but we need to verify the token's key with the public key
+                    const cognitoJWK: jose.KeyLike | undefined = await getCognitoJWK(decodedHeader.kid);
+                    if (!_.isUndefined(cognitoJWK)) {
+                        // verify the cognito JWT
+                        let claim: jose.JWTVerifyResult | undefined = undefined;
+                        let verified: boolean = false;
+                        try {
+                            claim = await jose.jwtVerify(bearerToken, cognitoJWK, {
+                                issuer: process.env.COGNITO_JWK_URL,
+                            });
+                            verified = true;
+                        } catch (err) {
+                            logger.info({ err }, MSG_JWT_NOT_VERIFIED);
+                            res.status(403).send();
+                            verified = false;
+                        }
 
-                                // check the use of the token
-                                if (
-                                    claim.payload.username === process.env.COGNITO_USERNAME &&
-                                    claim.payload.token_use === TOKEN_USE_ACCESS
-                                ) {
-                                    // rewrite to a canned Okta client credentials JWT
+                        // really hate the throwing control flow from the crypto libs
+                        if (verified && !_.isUndefined(claim)){
+                            // check the use of the token
+                            if (
+                                claim.payload.username === process.env.COGNITO_USERNAME &&
+                                claim.payload.token_use === TOKEN_USE_ACCESS
+                            ) {
+                                // rewrite to a canned Okta client credentials JWT
+                                try {
                                     const rewriteToken = await getOktaToken();
                                     req.headers.authorization = `Bearer ${rewriteToken}`;
                                     next();
-                                } else {
-                                    // it's a valid JWT from our configure cognito
-                                    // however, it's either not the airview user
-                                    // or someone is passing in a different oAuth2 token
-                                    logger.debug(MSG_NOT_COGNITO_USER);
-                                    res.status(403).send();
+                                } catch (err){
+                                    logger.error({err}, 'error getting okta token');
+                                    res.status(500).send();
                                 }
-                            } catch (err) {
-                                logger.info({ err }, MSG_JWT_NOT_VERIFIED);
+                            } else {
+                                // it's a valid JWT from our configure cognito
+                                // however, it's either not the airview user
+                                // or someone is passing in a different oAuth2 token
+                                logger.debug(MSG_NOT_COGNITO_USER);
                                 res.status(403).send();
                             }
-                        } else {
-                            logger.error(MSG_NO_COGNITO_JWK_KID);
-                            res.status(500).send();
                         }
                     } else {
-                        logger.debug(MSG_UNABLE_TO_DECODE);
-                        next();
+                        logger.error(MSG_NO_COGNITO_JWK_KID);
+                        res.status(500).send();
                     }
                 } else {
-                    logger.debug(MSG_JWK_URL_NO_MATCH);
+                    logger.debug(MSG_UNABLE_TO_DECODE);
                     next();
                 }
+            } else {
+                logger.debug(MSG_JWK_URL_NO_MATCH);
+                next();
             }
-        } catch (err) {
-            logger.error({ err }, MSG_FATAL_ERROR);
-            res.status(500).send();
         }
     });
 };
