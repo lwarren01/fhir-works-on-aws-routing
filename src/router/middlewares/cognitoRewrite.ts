@@ -4,6 +4,7 @@ import * as _ from 'lodash';
 import express from 'express';
 import * as axios from 'axios';
 import * as jose from 'jose';
+import AWS from 'aws-sdk';
 import getComponentLogger from '../../loggerBuilder';
 import RouteHelper from '../routes/routeHelper';
 
@@ -13,8 +14,9 @@ const OKTA_GRANT_TYPE = 'client_credentials';
 const SSM_OKTA_TOKEN_URL_NAME = `/${process.env.STAGE}/fhirworks-auth-issuer-endpoint`;
 const SSM_OKTA_CLIENT_ID_NAME = `/${process.env.STAGE}/fhirworks-api-client-id`;
 const SSM_OKTA_CLIENT_SECRET_NAME = `/${process.env.STAGE}/fhirworks-api-client-secret`;
-const OKTA_TOKEN_TTL_BUFFER = 30; // buffer to refresh token before expiration date
-const OKTA_PARAMETERS_TTL = 900000; // ttl for SSM okta parameters
+const OKTA_EXP_TTL_BUFFER = 300; // buffer to refresh token before expiration date in seconds
+const OKTA_IAT_BUFFER = 15; // buffer to handle clock skew between signer & this node in seconds
+const CACHE_TTL = 900000; // ttl for SSM okta parameters
 let RETRY_SLEEP_BASE = 10; // writable for unit tests
 const MSG_NO_AUTH_HEADER = 'no authorization bearer token found';
 const MSG_UNABLE_TO_DECODE = 'unable to decode auth token';
@@ -22,8 +24,12 @@ const MSG_JWK_URL_NO_MATCH = 'token not from cognito JWK';
 const MSG_NO_COGNITO_JWK_KID = 'key id was not found for cognito token';
 const MSG_JWT_NOT_VERIFIED = 'unable to verify';
 const MSG_NOT_COGNITO_USER = 'Not a valid cognito username or token_use';
-const logger = getComponentLogger().child({ method: 'cognitoRewrite' });
-let ssmClient: AWS.SSM;
+const MSG_NO_OKTA_TOKEN = 'error getting okta token';
+const MSG_CANT_GET_OKTA_PEM = 'error getting okta pem. Proceeding with new token';
+const MSG_OKTA_TOKEN_NO_KID = 'existing okta token has no kid. refreshing...';
+const MSG_OKTA_TOKEN_EXPIRED = 'expired okta token. refreshing...';
+const MSG_OKTA_UNABLE_TO_DECODE = 'not able to decode okta token. refreshing...';
+const MSG_OKTA_INVALID_TOKEN = 'invalid okta token refreshing...';
 
 interface OktaParameters {
     tokenUrl: string;
@@ -38,16 +44,23 @@ interface OktaResponse {
 }
 /* eslint-enable camelcase */
 
+const logger = getComponentLogger().child({ method: 'cognitoRewrite' });
+const keyToPem = new Map<string, jose.KeyLike>();
+let oktaParms: OktaParameters | undefined;
+let ssmClient: AWS.SSM;
+let oktaToken: OktaResponse | undefined;
+
+// // flush the various caches periodically
+setInterval(() => {
+    oktaParms = undefined;
+    keyToPem.clear();
+}, CACHE_TTL);
+
 /**
  * returns the parameter store values for Okta
  *
  * @return {AWSLambda.SSM.ParameterList} Okta parameter store parameters
  */
-let oktaParms: OktaParameters | undefined;
-setInterval(() => {
-    // flush the okta ssm parameter store params every 15 minutes from boot
-    oktaParms = undefined;
-}, OKTA_PARAMETERS_TTL);
 const getOktaParameters = async (): Promise<OktaParameters> => {
     if (_.isUndefined(oktaParms)) {
         const response = await ssmClient
@@ -81,7 +94,6 @@ const getOktaParameters = async (): Promise<OktaParameters> => {
     return oktaParms;
 };
 
-const keyToPem = new Map<string, jose.KeyLike>();
 /**
  * helper method to get a JWK public key in KeyLike format
  * @param {string} kid JWK key ID
@@ -114,11 +126,14 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
             }
         }
 
-        if (!_.isUndefined(response)){
-            for (const key of response.data.keys){
+        if (!_.isUndefined(response)) {
+            for (let i = 0; i < response.data.keys.length; i += 1) {
+                const key = response.data.keys[i];
                 if (!_.isUndefined(key.kid)) {
+                    /* eslint-disable no-await-in-loop */
                     const jwk = await jose.importJWK(key);
-    
+                    /* eslint-enable no-await-in-loop */
+
                     // make sure it's a KeyLike and not UInt8
                     // @ts-ignore
                     if (!_.isUndefined(jwk.type)) {
@@ -136,17 +151,17 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
 };
 
 /**
- * returns the cognito JWK as a PEM for the @parm
+ * returns the cognito JWK as a PEM for the kid
  * @param {string} kid Cognito Key ID
  *
  * @return {string} Cognito public key in PEM format
  */
 const getCognitoJWK = async (kid: string): Promise<jose.KeyLike | undefined> => {
-    return await getJWK(kid, `${process.env.COGNITO_JWK_URL}/.well-known/jwks.json`);
+    return getJWK(kid, `${process.env.COGNITO_JWK_URL}/.well-known/jwks.json`);
 };
 
 /**
- * returns the okta JWK as a PEM for the @parm
+ * returns the okta JWK as a PEM for the kid
  * @param {string} kid Okta Key ID
  *
  * @return {string} Okta public key in PEM format
@@ -154,9 +169,14 @@ const getCognitoJWK = async (kid: string): Promise<jose.KeyLike | undefined> => 
 const getOktaJWK = async (kid: string): Promise<jose.KeyLike | undefined> => {
     const oktaParameters = await getOktaParameters();
 
-    return await getJWK(kid, `${oktaParameters.tokenUrl}/v1/keys`);
+    return getJWK(kid, `${oktaParameters.tokenUrl}/v1/keys`);
 };
 
+/**
+ * Logins in to okta with the configured client credentials
+ *
+ * @return {string} Okta public key in PEM format
+ */
 const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
     const oktaParameters = await getOktaParameters();
 
@@ -173,12 +193,10 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
         try {
             /* eslint-disable no-await-in-loop */
             if (i !== 0) {
-                await new Promise((resolve) => {
-                    setTimeout(resolve, 2 ** (i + retryBase));
-                });
+                await new Promise((resolve) => setTimeout(resolve, 2 ** (i + retryBase)));
             }
 
-            response = await axios.default.post<OktaResponse>(oktaParameters.tokenUrl, params, {
+            response = await axios.default.post<OktaResponse>(`${oktaParameters.tokenUrl}/token`, params, {
                 timeout: 60000,
             });
             break;
@@ -186,7 +204,7 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
         } catch (e) {
             logger.error({ e }, 'Error calling to login to oAuth2');
             if (i === 4) {
-                throw new Error('Unable to login to Okta oAuth2');
+                throw new Error('unable to login to okta');
             }
         }
     }
@@ -199,7 +217,6 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
  *
  * @return {string} A good string
  */
-let oktaToken: OktaResponse | undefined;
 const getOktaToken = async (): Promise<string> => {
     // 1. unprimed
     // 2. good primed token
@@ -211,12 +228,24 @@ const getOktaToken = async (): Promise<string> => {
         oktaToken = await loginToOktaOAuth2();
     } else {
         // check if okta token we gots previously is still valid
-        const decodedPayload = jose.decodeJwt(oktaToken.access_token);
+        let decodedPayload: jose.JWTPayload | undefined;
+        let decoded = false;
+        try {
+            decodedPayload = jose.decodeJwt(oktaToken.access_token);
+            decoded = true;
+        } catch (err) {
+            logger.error({ err }, MSG_OKTA_UNABLE_TO_DECODE);
+        }
 
-        if (!_.isUndefined(decodedPayload.exp) && !_.isUndefined(decodedPayload.iat)) {
+        if (
+            decoded &&
+            !_.isUndefined(decodedPayload) &&
+            !_.isUndefined(decodedPayload.exp) &&
+            !_.isUndefined(decodedPayload.iat)
+        ) {
             // validate the expiration
             const now = Math.floor(new Date().valueOf() / 1000);
-            if (now > decodedPayload.iat || now < decodedPayload.iat - OKTA_TOKEN_TTL_BUFFER) {
+            if (now > decodedPayload.iat - OKTA_IAT_BUFFER && now < decodedPayload.exp - OKTA_EXP_TTL_BUFFER) {
                 // non expired token
 
                 // check if we want to validate the signature as well
@@ -226,38 +255,49 @@ const getOktaToken = async (): Promise<string> => {
                     process.env.COGNITO_VALIDATE_OKTA_TOKEN !== undefined &&
                     process.env.COGNITO_VALIDATE_OKTA_TOKEN.toLowerCase().trim() === 'true'
                 ) {
-                    const decodedHeader = jose.decodeProtectedHeader(oktaToken.access_token);
-                    if (!_.isUndefined(decodedHeader.kid)) {
+                    decoded = false;
+                    let decodedHeader: jose.ProtectedHeaderParameters | undefined;
+                    try {
+                        decodedHeader = jose.decodeProtectedHeader(oktaToken.access_token);
+                        decoded = true;
+                    } catch (err) {
+                        logger.error({ err }, MSG_OKTA_UNABLE_TO_DECODE);
+                    }
+
+                    if (decoded && !_.isUndefined(decodedHeader) && !_.isUndefined(decodedHeader.kid)) {
+                        // get the okta JWK
                         const oktaJWK = await getOktaJWK(decodedHeader.kid);
                         if (!_.isUndefined(oktaJWK)) {
+                            const oktaParameters = await getOktaParameters();
                             try {
                                 await jose.jwtVerify(oktaToken.access_token, oktaJWK, {
-                                    issuer: process.env.COGNITO_JWK_URL,
-                                    maxTokenAge: oktaToken.expires_in - OKTA_TOKEN_TTL_BUFFER,
+                                    issuer: oktaParameters.tokenUrl,
+                                    maxTokenAge: oktaToken.expires_in - OKTA_EXP_TTL_BUFFER,
                                 });
 
                                 // token is too legit to quit
                             } catch (err) {
                                 // something is wrong with the token; just rebuild the token
+                                logger.error({ err }, MSG_OKTA_INVALID_TOKEN);
                                 oktaToken = await loginToOktaOAuth2();
                             }
                         } else {
                             // sigh, can't find the okta pem
-                            logger.error('error getting okta pem. Proceeding with new token');
+                            logger.error(MSG_CANT_GET_OKTA_PEM);
                             oktaToken = await loginToOktaOAuth2();
                         }
                     } else {
-                        logger.debug('existing okta token has no kid. refreshing...');
+                        logger.debug(MSG_OKTA_TOKEN_NO_KID);
                         oktaToken = await loginToOktaOAuth2();
                     }
                 }
             } else {
-                logger.debug('expired okta token. refreshing...');
+                logger.debug(MSG_OKTA_TOKEN_EXPIRED);
                 oktaToken = await loginToOktaOAuth2();
             }
         } else {
             // just rebuild the whole token
-            logger.debug('not able to decode okta token. refreshing...');
+            logger.debug(MSG_OKTA_UNABLE_TO_DECODE);
             oktaToken = await loginToOktaOAuth2();
         }
     }
@@ -271,11 +311,9 @@ const getOktaToken = async (): Promise<string> => {
  *
  * @returns Async middleware function
  */
-export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction,
-) => void = (ssm:AWS.SSM) => {
+export const cognitoRewriteMiddleware: (
+    ssm: AWS.SSM,
+) => (req: express.Request, res: express.Response, next: express.NextFunction) => void = (ssm: AWS.SSM) => {
     ssmClient = ssm;
     return RouteHelper.wrapAsync(async (req: express.Request, res: express.Response, next: express.NextFunction) => {
         // check if we have an authorization header w/Bearer
@@ -288,19 +326,34 @@ export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
             next();
         } else {
             const bearerToken = cleanAuthHeader(req.headers.authorization);
-            // do a 1st pass parse to see if it's a token from cognito
-            const decodedPayload = jose.decodeJwt(bearerToken);
+
+            let decoded = false;
+            let decodedPayload: jose.JWTPayload | undefined;
+            try {
+                // do a 1st pass parse to see if it's a token from cognito
+                decodedPayload = jose.decodeJwt(bearerToken);
+                decoded = true;
+            } catch (err) {
+                logger.error({ err }, MSG_UNABLE_TO_DECODE);
+            }
 
             // see if the token is from cognito
-            if (decodedPayload.iss === process.env.COGNITO_JWK_URL) {
-                const decodedHeader = jose.decodeProtectedHeader(bearerToken);
+            if (decoded && !_.isUndefined(decodedPayload) && decodedPayload.iss === process.env.COGNITO_JWK_URL) {
+                decoded = false;
+                let decodedHeader: jose.ProtectedHeaderParameters | undefined;
+                try {
+                    decodedHeader = jose.decodeProtectedHeader(bearerToken);
+                    decoded = true;
+                } catch (err) {
+                    logger.error({ err }, MSG_UNABLE_TO_DECODE);
+                }
 
-                if (!_.isUndefined(decodedHeader.kid)) {
+                if (decoded && !_.isUndefined(decodedHeader) && !_.isUndefined(decodedHeader.kid)) {
                     // it's looks like a token from cognito but we need to verify the token's key with the public key
                     const cognitoJWK: jose.KeyLike | undefined = await getCognitoJWK(decodedHeader.kid);
                     if (!_.isUndefined(cognitoJWK)) {
                         // verify the cognito JWT
-                        let claim: jose.JWTVerifyResult | undefined = undefined;
+                        let claim: jose.JWTVerifyResult | undefined;
                         let verified: boolean = false;
                         try {
                             claim = await jose.jwtVerify(bearerToken, cognitoJWK, {
@@ -309,24 +362,29 @@ export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
                             verified = true;
                         } catch (err) {
                             logger.info({ err }, MSG_JWT_NOT_VERIFIED);
-                            res.status(403).send();
-                            verified = false;
                         }
 
                         // really hate the throwing control flow from the crypto libs
-                        if (verified && !_.isUndefined(claim)){
+                        if (verified && !_.isUndefined(claim)) {
                             // check the use of the token
                             if (
                                 claim.payload.username === process.env.COGNITO_USERNAME &&
                                 claim.payload.token_use === TOKEN_USE_ACCESS
                             ) {
-                                // rewrite to a canned Okta client credentials JWT
+                                // rewrite to an impersonated Okta client credentials JWT
+                                // try/catch standalone so we don't catch res.status().send() | next() errors
+                                let rewriteToken;
+                                let gotToken = false;
                                 try {
-                                    const rewriteToken = await getOktaToken();
+                                    rewriteToken = await getOktaToken();
+                                    gotToken = true;
+                                } catch (err) {
+                                    logger.error({ err }, MSG_NO_OKTA_TOKEN);
+                                }
+                                if (gotToken && !_.isUndefined(rewriteToken)) {
                                     req.headers.authorization = `Bearer ${rewriteToken}`;
                                     next();
-                                } catch (err){
-                                    logger.error({err}, 'error getting okta token');
+                                } else {
                                     res.status(500).send();
                                 }
                             } else {
@@ -336,6 +394,8 @@ export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
                                 logger.debug(MSG_NOT_COGNITO_USER);
                                 res.status(403).send();
                             }
+                        } else {
+                            res.status(403).send();
                         }
                     } else {
                         logger.error(MSG_NO_COGNITO_JWK_KID);
@@ -356,4 +416,11 @@ export const cognitoRewriteMiddleware: (ssm: AWS.SSM) => (
 // test hook helper function to set the ret
 export function setRetrySleepBase(base: number) {
     RETRY_SLEEP_BASE = base;
+}
+
+// test hook helper function for clearing all internal state
+export function clear() {
+    oktaParms = undefined;
+    keyToPem.clear();
+    oktaToken = undefined;
 }
