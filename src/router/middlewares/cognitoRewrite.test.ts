@@ -1,11 +1,14 @@
 /* ugh, jest is something something
  * https://github.com/panva/jose/issues/307
  * https://github.com/jsdom/jsdom/issues/2524#issuecomment-897707183
+ * https://github.com/axios/axios/issues/1180#issuecomment-477920274
  */
 /* eslint-disable import/newline-after-import,import/order,import/first  */
 const { TextEncoder, TextDecoder } = require('util');
 global.TextEncoder = TextEncoder;
 global.TextDecoder = TextDecoder;
+// @ts-ignore
+global.XMLHttpRequest = undefined;
 /* eslint-enable import/newline-after-import,import/order */
 
 import express from 'express';
@@ -880,7 +883,7 @@ describe('cognitoRewrite', () => {
         });
     });
 
-    test('okta token just passed through', (done)=>{
+    test('okta token just passed through', (done) => {
         const fx = cognitoRewrite.cognitoRewriteMiddleware(new AWS.SSM());
 
         // okta token

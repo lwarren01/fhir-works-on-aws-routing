@@ -183,11 +183,11 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
     // call Okta's OAuth2 w/client credentials
     let response: any;
     const params = new URLSearchParams({
-        client_id: oktaParameters.clientId,
         scope: OKTA_SCOPE,
+        client_id: oktaParameters.clientId,
         client_secret: oktaParameters.clientSecret,
         grant_type: OKTA_GRANT_TYPE,
-    }).toString();
+    });
     const retryBase = RETRY_SLEEP_BASE;
     for (let i = 0; i < 5; i += 1) {
         try {
@@ -196,13 +196,16 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
                 await new Promise((resolve) => setTimeout(resolve, 2 ** (i + retryBase)));
             }
 
-            response = await axios.default.post<OktaResponse>(`${oktaParameters.tokenUrl}/token`, params, {
+            response = await axios.default.post<OktaResponse>(`${oktaParameters.tokenUrl}/v1/token`, params, {
                 timeout: 60000,
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
             });
             break;
             /* eslint-enable no-await-in-loop */
-        } catch (e) {
-            logger.error({ e }, 'Error calling to login to oAuth2');
+        } catch (err) {
+            logger.error({ err }, 'Error calling to login to oAuth2');
             if (i === 4) {
                 throw new Error('unable to login to okta');
             }
@@ -366,7 +369,6 @@ export const cognitoRewriteMiddleware: (
 
                         // really hate the throwing control flow from the crypto libs
                         if (verified && !_.isUndefined(claim) && !_.isUndefined(claim.payload.token_use)) {
-
                             // check the use of the token
                             if (
                                 claim.payload.username === process.env.COGNITO_USERNAME &&
