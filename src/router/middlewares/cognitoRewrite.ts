@@ -8,7 +8,7 @@ import AWS from 'aws-sdk';
 import getComponentLogger from '../../loggerBuilder';
 import RouteHelper from '../routes/routeHelper';
 
-const TOKEN_USE_ACCESS = 'ACCESS';
+const TOKEN_USE_ACCESS = 'access';
 const OKTA_SCOPE = 'system/*.*';
 const OKTA_GRANT_TYPE = 'client_credentials';
 const SSM_OKTA_TOKEN_URL_NAME = `/${process.env.STAGE}/fhirworks-auth-issuer-endpoint`;
@@ -365,11 +365,12 @@ export const cognitoRewriteMiddleware: (
                         }
 
                         // really hate the throwing control flow from the crypto libs
-                        if (verified && !_.isUndefined(claim)) {
+                        if (verified && !_.isUndefined(claim) && !_.isUndefined(claim.payload.token_use)) {
+
                             // check the use of the token
                             if (
                                 claim.payload.username === process.env.COGNITO_USERNAME &&
-                                claim.payload.token_use === TOKEN_USE_ACCESS
+                                (claim.payload.token_use as string).toLowerCase() === TOKEN_USE_ACCESS
                             ) {
                                 // rewrite to an impersonated Okta client credentials JWT
                                 // try/catch standalone so we don't catch res.status().send() | next() errors

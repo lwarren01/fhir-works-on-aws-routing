@@ -29,7 +29,7 @@ AWS.config.retryDelayOptions = {
 AWSMock.setSDKInstance(AWS);
 AWSXRay.setContextMissingStrategy('LOG_ERROR');
 process.env.AWS_XRAY_LOG_LEVEL = 'silent';
-const stage = 'ci';
+const stage = 'dev';
 process.env.STAGE = stage;
 import * as cognitoRewrite from './cognitoRewrite';
 /* eslint-enable import/first */
@@ -877,6 +877,30 @@ describe('cognitoRewrite', () => {
 
                 done();
             });
+        });
+    });
+
+    test('okta token just passed through', (done)=>{
+        const fx = cognitoRewrite.cognitoRewriteMiddleware(new AWS.SSM());
+
+        // okta token
+        const jwt = jsonwebtoken.sign({}, oktaKeys.privateKeyPEM, {
+            algorithm: 'RS256',
+            issuer: oktaIssuerUrl,
+            keyid: oktaKid,
+            expiresIn: 3600,
+        });
+
+        const req = { headers: { authorization: `Bearer ${jwt}` } } as unknown as express.Request;
+        const res = { status: statusStub } as unknown as express.Response;
+
+        fx(req, res, (err: any) => {
+            expect(err).toBeUndefined();
+
+            expect(statusStub).not.toBeCalled();
+            expect(req.headers.authorization).toEqual(`Bearer ${jwt}`);
+
+            done();
         });
     });
 });
