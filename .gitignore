@@ -4,6 +4,7 @@
 **/node_modules/
 **/npm-debug.log
 **/pnpm-debug.log
+/.vscode/*
 
 .build
 
@@ -28,3 +29,4 @@ serverless-output.yml
 serverless-output.yaml
 serverless_config.json
 
+!/.vscode/launch.json
