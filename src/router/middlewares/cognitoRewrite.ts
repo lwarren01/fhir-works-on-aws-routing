@@ -118,7 +118,7 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
                 break;
                 /* eslint-enable no-await-in-loop */
             } catch (e) {
-                logger.error({ e, url: jwkUrl }, 'Error calling to get JWK public keys');
+                logger.error('Error calling to get JWK public keys', { e, url: jwkUrl });
                 if (i === 4) {
                     response = undefined;
                     break;
@@ -140,7 +140,7 @@ const getJWK = async (kid: string, jwkUrl: string): Promise<jose.KeyLike | undef
                         // @ts-ignore
                         keyToPem.set(key.kid, jwk);
                     } else {
-                        logger.info({ kid: key.kid }, 'JWK imported as uint8array type');
+                        logger.info('JWK imported as uint8array type', { kid: key.kid });
                     }
                 }
             }
@@ -205,7 +205,7 @@ const loginToOktaOAuth2 = async (): Promise<OktaResponse> => {
             break;
             /* eslint-enable no-await-in-loop */
         } catch (err) {
-            logger.error({ err }, 'Error calling to login to oAuth2');
+            logger.error('Error calling to login to oAuth2', { err });
             if (i === 4) {
                 throw new Error('unable to login to okta');
             }
@@ -237,7 +237,7 @@ const getOktaToken = async (): Promise<string> => {
             decodedPayload = jose.decodeJwt(oktaToken.access_token);
             decoded = true;
         } catch (err) {
-            logger.error({ err }, MSG_OKTA_UNABLE_TO_DECODE);
+            logger.error(MSG_OKTA_UNABLE_TO_DECODE, { err });
         }
 
         if (
@@ -264,7 +264,7 @@ const getOktaToken = async (): Promise<string> => {
                         decodedHeader = jose.decodeProtectedHeader(oktaToken.access_token);
                         decoded = true;
                     } catch (err) {
-                        logger.error({ err }, MSG_OKTA_UNABLE_TO_DECODE);
+                        logger.error(MSG_OKTA_UNABLE_TO_DECODE, { err });
                     }
 
                     if (decoded && !_.isUndefined(decodedHeader) && !_.isUndefined(decodedHeader.kid)) {
@@ -281,7 +281,7 @@ const getOktaToken = async (): Promise<string> => {
                                 // token is too legit to quit
                             } catch (err) {
                                 // something is wrong with the token; just rebuild the token
-                                logger.error({ err }, MSG_OKTA_INVALID_TOKEN);
+                                logger.error(MSG_OKTA_INVALID_TOKEN, { err });
                                 oktaToken = await loginToOktaOAuth2();
                             }
                         } else {
@@ -337,7 +337,7 @@ export const cognitoRewriteMiddleware: (
                 decodedPayload = jose.decodeJwt(bearerToken);
                 decoded = true;
             } catch (err) {
-                logger.error({ err }, MSG_UNABLE_TO_DECODE);
+                logger.error(MSG_UNABLE_TO_DECODE, { err });
             }
 
             // see if the token is from cognito
@@ -348,7 +348,7 @@ export const cognitoRewriteMiddleware: (
                     decodedHeader = jose.decodeProtectedHeader(bearerToken);
                     decoded = true;
                 } catch (err) {
-                    logger.error({ err }, MSG_UNABLE_TO_DECODE);
+                    logger.error(MSG_UNABLE_TO_DECODE, { err });
                 }
 
                 if (decoded && !_.isUndefined(decodedHeader) && !_.isUndefined(decodedHeader.kid)) {
@@ -364,7 +364,7 @@ export const cognitoRewriteMiddleware: (
                             });
                             verified = true;
                         } catch (err) {
-                            logger.info({ err }, MSG_JWT_NOT_VERIFIED);
+                            logger.info(MSG_JWT_NOT_VERIFIED, { err });
                         }
 
                         // really hate the throwing control flow from the crypto libs
@@ -382,7 +382,7 @@ export const cognitoRewriteMiddleware: (
                                     rewriteToken = await getOktaToken();
                                     gotToken = true;
                                 } catch (err) {
-                                    logger.error({ err }, MSG_NO_OKTA_TOKEN);
+                                    logger.error(MSG_NO_OKTA_TOKEN, { err });
                                 }
                                 if (gotToken && !_.isUndefined(rewriteToken)) {
                                     req.headers.authorization = `Bearer ${rewriteToken}`;
