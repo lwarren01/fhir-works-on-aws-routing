@@ -276,6 +276,7 @@ const getOktaToken = async (): Promise<string> => {
                                 await jose.jwtVerify(oktaToken.access_token, oktaJWK, {
                                     issuer: oktaParameters.tokenUrl,
                                     maxTokenAge: oktaToken.expires_in - OKTA_EXP_TTL_BUFFER,
+                                    audience: process.env.API_URL,
                                 });
 
                                 // token is too legit to quit

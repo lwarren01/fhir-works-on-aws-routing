@@ -34,6 +34,8 @@ AWSXRay.setContextMissingStrategy('LOG_ERROR');
 process.env.AWS_XRAY_LOG_LEVEL = 'silent';
 const stage = 'dev';
 process.env.STAGE = stage;
+const apiUrl = 'https://apigateway.example.com/dev';
+process.env.API_URL = apiUrl;
 import * as cognitoRewrite from './cognitoRewrite';
 /* eslint-enable import/first */
 
@@ -108,6 +110,7 @@ describe('cognitoRewrite', () => {
             issuer: oktaIssuerUrl,
             keyid: oktaKid,
             expiresIn: 3600,
+            audience: apiUrl,
         });
         // @ts-ignore
         axios.post.mockResolvedValue({
@@ -613,6 +616,7 @@ describe('cognitoRewrite', () => {
             issuer: oktaIssuerUrl,
             keyid: oktaKid,
             expiresIn: 3600,
+            audience: apiUrl,
         });
         // @ts-ignore
         axios.post.mockResolvedValueOnce({
@@ -669,6 +673,7 @@ describe('cognitoRewrite', () => {
             issuer: oktaIssuerUrl,
             keyid: oktaKid,
             expiresIn: -3600,
+            audience: apiUrl,
         });
         // @ts-ignore
         axios.post.mockResolvedValueOnce({
@@ -740,6 +745,7 @@ describe('cognitoRewrite', () => {
             issuer: 'https://fubar.example.com',
             keyid: oktaKid,
             expiresIn: 3600,
+            audience: apiUrl,
         });
         // @ts-ignore
         axios.post.mockResolvedValueOnce({
@@ -755,6 +761,7 @@ describe('cognitoRewrite', () => {
             issuer: oktaIssuerUrl,
             keyid: oktaKid,
             expiresIn: -3600,
+            audience: apiUrl,
         });
         // @ts-ignore
         axios.post.mockResolvedValueOnce({
