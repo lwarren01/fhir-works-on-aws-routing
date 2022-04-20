@@ -37,6 +37,7 @@ export default class MetadataRoute {
             const response = await this.metadataHandler.capabilities({
                 fhirVersion: this.fhirVersion,
                 mode,
+                fhirServiceBaseUrl: res.locals.serverUrl,
             });
             res.send(response.resource);
         });

@@ -2,9 +2,9 @@
  *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *  SPDX-License-Identifier: Apache-2.0
  */
-
 import { Capabilities, CapabilitiesRequest, FhirVersion, GenericResponse } from 'fhir-works-on-aws-interface';
 import createError from 'http-errors';
+import { isUndefined } from 'lodash';
 import { makeGenericResources, makeResource } from './cap.rest.resource.template';
 import makeSecurity from './cap.rest.security.template';
 import makeRest from './cap.rest.template';
@@ -72,7 +72,14 @@ export default class MetadataHandler implements Capabilities {
         const generatedResources = await this.generateResources(request.fhirVersion);
         const security = makeSecurity(auth, this.hasCORSEnabled);
         const rest = makeRest(generatedResources, security, profile.systemOperations, !!profile.bulkDataAccess);
-        const capStatement = makeStatement(rest, productInfo, server.url, request.fhirVersion);
+
+        // determine if our implentation.url is a static tld or dynamic
+        let serverUrl = server.url;
+        if (server.dynamicHostName && !isUndefined(request.fhirServiceBaseUrl)) {
+            serverUrl = request.fhirServiceBaseUrl;
+        }
+
+        const capStatement = makeStatement(rest, productInfo, serverUrl, request.fhirVersion);
 
         return {
             message: 'success',

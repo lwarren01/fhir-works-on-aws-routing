@@ -17,10 +17,25 @@ export const setServerUrlMiddleware: (
     fhirConfig: FhirConfig,
 ) => (req: express.Request, res: express.Response, next: express.NextFunction) => void = (fhirConfig: FhirConfig) => {
     return RouteHelper.wrapAsync(async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+        let serverUrl = fhirConfig.server.url;
+        if (fhirConfig.server.dynamicHostName && req.headers.host !== undefined) {
+            // use the request's hostname instead of the configured url
+            // this is useful when requests can come from multiple TLDs
+            // examples: private API gateway, custom DNS values, CNAMES
+            const parsedUrl = new URL(serverUrl);
+            parsedUrl.hostname = req.headers.host;
+
+            // downstream code expects no trailing `/` char
+            serverUrl = parsedUrl.href;
+            if (serverUrl.endsWith('/')) {
+                serverUrl = serverUrl.substring(0, parsedUrl.href.length - 1);
+            }
+        }
+
         if (req.baseUrl && req.baseUrl !== '/') {
-            res.locals.serverUrl = fhirConfig.server.url + req.baseUrl;
+            res.locals.serverUrl = serverUrl + req.baseUrl;
         } else {
-            res.locals.serverUrl = fhirConfig.server.url;
+            res.locals.serverUrl = serverUrl;
         }
         next();
     });
